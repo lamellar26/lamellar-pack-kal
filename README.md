@@ -31,9 +31,12 @@ lamellar run "who approves leave requests?"
 
 Notes gave nothing extra on single-fact questions; the gain comes from searching the passages. Notes are kept as a map for long libraries and for questions that span several places. That use is not measured yet.
 
-**Conversations: 20 real conversations replayed, then 20 follow-up questions asked in new sessions** (see below)
-- Without the conversation library: 1 of 20 right.
-- With it: see the table in `docs` (filled in by the KL9 run).
+**Conversations: 20 real conversations replayed, then one follow-up question each, asked in a new session** (9B model, two runs each)
+- Without the conversation library: 1 and 3 of 20 right (the model searched the machine with tools and mostly did not find it).
+- Conversation passages (the default): 11 and 14 of 20.
+- Passages plus notes written from the conversations: 14 and 14, but those notes invented details (below), so they are off by default.
+- Unrelated questions: without reranking, 6 of 10 had text added; with it, 1 of 20 checks did (1,193 characters).
+- The rerank threshold and the writer prompt were tuned on this same set; a fresh set is needed for a clean number.
 
 ## Conversation library (off by default)
 
