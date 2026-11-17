@@ -1,0 +1,6 @@
+{
+  "name": "kal",
+  "version": "0.2.0",
+  "requires_core": "0.2.2",
+  "description": "Knowledge plate: your folders (md, txt, docx) become a local library the model can search before every task; a nightly local-model digest writes short notes whose quotes a program checks word for word. Optionally keeps what each user's conversations established in a private library. Offline, standard library only."
+}
