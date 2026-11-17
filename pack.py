@@ -4,11 +4,14 @@ short notes that quote the text word for word (checked by a program). Fully offl
 Config (worker.json):
   "kal": {"libs": ["default"], "max_chars": 3000, "min_rel": 0.05, "rel_top": 0.5, "k": 5, "inject": true, "use_nodes": true,
           "rerank_model": "", "rerank_keep": 5, "digest_model": "", "night_minutes": 120, "timeout_s": 30,
-          "chat_write": false, "chat_learn": true, "chat_nodes": false, "chat_model": "", "chat_timeout_s": 120}
+          "chat_write": false, "chat_learn": true, "chat_nodes": false, "chat_model": "", "chat_timeout_s": 120,
+          "chat_rerank": true, "chat_rerank_keep": 3}
   chat_write: after each delivered answer that used tools or stated facts, what the user said and what tools returned is
   saved to the user's private library (chat-<bot>-<chat>.db, see kalcore/chat.py), searched only for the same user.
   chat_nodes: also have the model write notes from it. Off by default: in the KL9 replay of 20 real conversations
   a 27B writer invented details in 3 of 24 notes even after the program QC.
+  chat_rerank: conversation passages are long tool outputs, so word overlap alone lets unrelated questions in (6 of 10 in KL9);
+  each candidate is scored by the model (rerank_model, else the main model) and kept at >= chat_rerank_keep (0 of 10 in KL9).
 """
 import json, os, sys, time, urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,7 +20,8 @@ from kalcore import store, digest, chat as kchat
 
 DEFAULTS = {'libs': ['default'], 'max_chars': 3000, 'min_rel': 0.05, 'rel_top': 0.5, 'k': 5, 'inject': True, 'use_nodes': True,
             'rerank_model': '', 'rerank_keep': 5, 'digest_model': '', 'night_minutes': 120, 'timeout_s': 30, 'review_model': '',
-            'chat_write': False, 'chat_learn': True, 'chat_nodes': False, 'chat_model': '', 'chat_timeout_s': 120}
+            'chat_write': False, 'chat_learn': True, 'chat_nodes': False, 'chat_model': '', 'chat_timeout_s': 120,
+            'chat_rerank': True, 'chat_rerank_keep': 3}
 
 
 def opts(cfg): return {**DEFAULTS, **(cfg.get('kal') or {})}
@@ -65,7 +69,12 @@ def _context(cfg, task, use_nodes=None):
     for lib, c in _libs(cfg):
         r = store.search(c, task, k=o['k'], min_rel=o['min_rel'], nodes=use_nodes, rel_top=o['rel_top'])
         found = r['nodes'] + (kchat.hops(c, r['nodes'], min_rel=o['min_rel']) if use_nodes and lib.startswith('chat-') else [])
-        nodes += [dict(n, lib=lib) for n in found]; chunks += [dict(x, lib=lib) for x in r['chunks']]
+        lib_nodes = [dict(n, lib=lib) for n in found]; lib_chunks = [dict(x, lib=lib) for x in r['chunks']]
+        if lib.startswith('chat-') and o['chat_rerank'] and not o['rerank_model'] and (lib_nodes or lib_chunks):
+            ro = {**o, 'rerank_model': cfg.get('model', ''), 'rerank_keep': o['chat_rerank_keep']}
+            lib_nodes, lib_chunks = _rerank(cfg, ro, task, lib_nodes, deadline), _rerank(cfg, ro, task, lib_chunks, deadline)
+            found = [n for n in found if any(n['id'] == m['id'] for m in lib_nodes)]
+        nodes += lib_nodes; chunks += lib_chunks
         if use_nodes:   # the passages a note cites come along, even if they did not match by themselves
             have = {x['ref'] for x in chunks}
             for n in found:

@@ -39,7 +39,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.t = tempfile.mkdtemp()
         self.cfg = {'model': 'm', 'context': 8192, 'state_dir': self.t, 'max_output_tokens': 100, 'endpoint': 'http://127.0.0.1:9/v1',
-                    'armor_bot': 'web', 'armor_chat': 'alice', 'kal': {'chat_write': True}}
+                    'armor_bot': 'web', 'armor_chat': 'alice', 'kal': {'chat_write': True, 'chat_rerank': False}}
 
     def tearDown(self): shutil.rmtree(self.t)
 
@@ -256,6 +256,20 @@ class KL9SourceOnly(Base):
         self.assertEqual(ctx['kal_chat']['mode'], 'source only')
         ctx2 = {'cfg': self.cfg, 'task': '你是誰？', 'messages': [{'role': 'user', 'content': '你是誰？'}], 'tools_used': 0}
         pack.after_delivery('我係 lamellar', ctx2, None); self.assertIn('skipped', ctx2['kal_chat'])
+
+
+class KL9Rerank(Base):
+    def test_chat_library_is_reranked_by_default(self):
+        self.learn([{'items': []}])
+        seen = []
+        def fake_rerank(cfg, o, task, cands, deadline):
+            seen.append((o['rerank_model'], o['rerank_keep'], len(cands))); return []      # the model says nothing is useful
+        old = pack._rerank; pack._rerank = fake_rerank
+        try:
+            cfg = {**self.cfg, 'kal': {'chat_write': True}}
+            self.assertEqual(pack.context(cfg, 'Bright Harbour 訂咗幾多部 LeArm？'), '')
+            self.assertTrue(seen and seen[0][:2] == ('m', 3))
+        finally: pack._rerank = old
 
 
 if __name__ == '__main__': unittest.main()
