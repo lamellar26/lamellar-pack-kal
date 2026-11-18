@@ -31,15 +31,21 @@ The gain comes from searching the passages, so model-written notes were removed 
 - Unrelated questions: without reranking, 6 of 10 had text added; with it, 1 of 20 checks did (1,193 characters).
 - The rerank threshold and the writer prompt were tuned on this same set; a fresh set is needed for a clean number.
 
-## Conversation library (off by default)
+## Conversation library (on by default)
 
-Set `"chat_write": true` and each user gets a private library: `chat-<bot>-<chat>.db`. One user never sees another user's library.
+Each user gets a private library: `chat-<bot>-<chat>.db`. One user never sees another user's library. It stays on your machine. In a group chat it keeps what everyone in the group said; set `"chat_write": false` for a group that has not agreed to this.
 
 **What is saved**
 - After an answer is delivered (the user does not wait), the plate saves what the user said and what the tools returned.
 - It saves only when the exchange used a tool or the user stated facts. Pure chat is skipped and calls no model.
 - The assistant's own words are never saved as a source.
 - Content on the never-remember list (passwords, keys, ID numbers, phone numbers, emails, amounts) is masked before storing.
+
+**When the user says "note this"** ("記底", "remember this", "take a note")
+- The model saves the user's own words with the `kal_note` tool, and the reply shows what was saved.
+- If the model does not call `kal_note`, the message is saved after the answer anyway, whatever its length. A bare "note this" also keeps the message before it.
+- If the answer says "saved" but nothing was saved, the answer is sent back to the model before the user sees it.
+- `kal_note` works even with `chat_write` off: asking is consent.
 
 **How it is searched**
 - Conversation passages are mostly long tool outputs, so word overlap alone lets unrelated questions in.
@@ -66,7 +72,7 @@ libs              ["default"]  libraries used when answering
 max_chars         3000         cap on added text
 min_rel, rel_top  0.05, 0.5    relevance floor, and share of the best hit to keep
 rerank_model      ""           optional reranker for all libraries (one request per candidate)
-chat_write        false        conversation library on/off
+chat_write        true         conversation library on/off (false: only explicit "note this" is kept)
 chat_rerank       true         rerank conversation passages (keep >= chat_rerank_keep, default 3)
 ```
 

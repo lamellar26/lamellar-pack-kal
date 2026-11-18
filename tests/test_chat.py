@@ -102,8 +102,8 @@ class KL6Hook(Base):
         ctx2 = {'cfg': self.cfg, 'task': '你是誰？', 'messages': [{'role': 'user', 'content': '你是誰？'}], 'tools_used': 0}
         pack.after_delivery('我係 lamellar', ctx2, None); self.assertIn('skipped', ctx2['kal_chat'])
 
-    def test_off_by_default(self):
-        cfg = {**self.cfg, 'kal': {}}; ctx = {'cfg': cfg, 'task': TASK, 'messages': msgs_for(TASK, TOOL_OUT), 'tools_used': 1}
+    def test_off_when_disabled(self):
+        cfg = {**self.cfg, 'kal': {'chat_write': False}}; ctx = {'cfg': cfg, 'task': TASK, 'messages': msgs_for(TASK, TOOL_OUT), 'tools_used': 1}
         pack.after_delivery(ANSWER, ctx, None); self.assertNotIn('kal_chat', ctx)
 
 
@@ -120,3 +120,56 @@ class KL9Rerank(Base):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class Note(Base):
+    """0.4.0: "記底" is an explicit instruction; a claim of "saved" must be true."""
+    def test_cue(self):
+        for t in ['記底：觀塘有間陳大餅店', '記底', '幫我記住 Kelvin 鍾意飲奶茶', 'note this: gate code is in the drawer']:
+            self.assertTrue(kc.wants_note(t), t)
+        for t in ['為什麼無加入筆記指令？', '你記住咗未？', '今日好熱']:
+            self.assertFalse(kc.wants_note(t), t)
+
+    def test_short_fact_with_cue_is_saved(self):            # the 陳大餅店 case: 8 chars, no digits, used to be skipped
+        out = self.learn(task='記底，觀塘有間陳大餅店', tool=None)
+        self.assertNotIn('skipped', out)
+        self.assertIn('陳大餅店', pack.kal_search({'cfg': self.cfg}, '陳大餅店')[1])
+
+    def test_bare_cue_keeps_previous_message(self):
+        msgs = [{'role': 'user', 'content': '觀塘有間陳大餅店'}, {'role': 'assistant', 'content': '好'},
+                {'role': 'user', 'content': '記底'}]
+        kc.learn_exchange(self.cfg, '記底', msgs, 0, 's')
+        self.assertIn('陳大餅店', pack.kal_search({'cfg': self.cfg}, '陳大餅店')[1])
+
+    def test_kal_note_tool(self):
+        ctx = {'cfg': self.cfg, 'kal_task': '記底：觀塘有間陳大餅店', 'session': 's'}
+        ok, out = pack.kal_note(ctx, '觀塘有間陳大餅店')
+        self.assertTrue(ok); self.assertTrue(out.startswith(kc.NOTED)); self.assertTrue(ctx['kal_noted'])
+        self.assertIn('陳大餅店', pack.context({**self.cfg, 'kal': {'chat_write': True, 'chat_rerank': False}}, '觀塘陳大餅店喺邊？'))
+        self.assertFalse(pack.kal_note(ctx, '  ')[0])
+
+    def test_kal_note_works_with_chat_write_off(self):
+        cfg = {**self.cfg, 'kal': {'chat_write': False, 'chat_rerank': False}}
+        pack.kal_note({'cfg': cfg, 'kal_task': '記底 X'}, '觀塘有間陳大餅店')
+        self.assertIn('陳大餅店', pack.kal_search({'cfg': cfg}, '陳大餅店')[1])
+
+    def test_no_double_save_after_kal_note(self):
+        msgs = [{'role': 'user', 'content': '記底：觀塘有間陳大餅店'},
+                {'role': 'tool', 'content': kc.NOTED + ' [chat/x#t1.1]:\n觀塘有間陳大餅店'}]
+        self.assertIn('skipped', kc.learn_exchange(self.cfg, '記底：觀塘有間陳大餅店', msgs, 1, 's', noted=True))
+
+    def test_false_saved_claim_bounced(self):
+        ctx = {'cfg': self.cfg, 'kal_task': '記底：觀塘有間陳大餅店'}
+        self.assertIsNotNone(pack.before_delivery('好，記低咗！', ctx))
+        self.assertIsNone(pack.before_delivery('未存到，因為出錯。', ctx))
+        ctx['kal_noted'] = True
+        self.assertIsNone(pack.before_delivery('好，記低咗！', ctx))
+        self.assertIsNone(pack.before_delivery('記低咗', {'cfg': self.cfg, 'kal_task': '今日好熱'}))
+
+    def test_hint_injected(self):
+        ctx = {'cfg': {**self.cfg, 'kal': {'inject': False}}}
+        self.assertIn('kal_note', pack.before_task('記底：觀塘有間陳大餅店', ctx))
+        self.assertIsNone(pack.before_task('今日好熱', ctx))
+
+    def test_default_on(self):
+        self.assertTrue(pack.DEFAULTS['chat_write'])

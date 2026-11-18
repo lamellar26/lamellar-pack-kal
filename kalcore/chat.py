@@ -46,8 +46,20 @@ def stated_facts(text):
     return out
 
 
+NOTE_CUE = re.compile(r'記底|記低|記住|記下|记住|记下|记底|幫我記|帮我记|備忘|备忘|'
+                      r'\b(note|jot) (this|that|it|down)\b|\b(take|make) a note\b|\bremember (this|that)\b', re.I)
+NOTED = 'kal_note saved'      # prefix of a successful kal_note result (so the after-delivery step does not save it twice)
+
+
+def wants_note(text):
+    """The user explicitly asked to keep something ("記底", "note this"): saved whatever the length filter says."""
+    t = (text or '').strip()
+    return bool(NOTE_CUE.search(t)) and not QUESTION_END.search(t)
+
+
 def should_write(task, tools_used, tool_texts):
-    """KL6 gate: pure chat never calls the model."""
+    """KL6 gate: pure chat never calls the model. An explicit "記底" is always saved."""
+    if wants_note(task): return True
     if GREETING.match(task or ''): return False
     if tools_used and any(t.strip() for t in tool_texts): return True
     return bool(stated_facts(task))
@@ -58,7 +70,26 @@ def this_turn(task, messages):
     start = 0
     for i, m in enumerate(messages):
         if m.get('role') == 'user' and isinstance(m.get('content'), str) and task and task[:200] in m['content']: start = i
-    return [m.get('content') or '' for m in messages[start:] if m.get('role') == 'tool']
+    return [m.get('content') or '' for m in messages[start:] if m.get('role') == 'tool' and not (m.get('content') or '').startswith(NOTED)]
+
+
+def previous_user(task, messages):
+    """The user's message before this one (for a bare "記底" that points at what was just said)."""
+    users = [m['content'] for m in messages if m.get('role') == 'user' and isinstance(m.get('content'), str)]
+    for i in range(len(users) - 1, -1, -1):
+        if task and task[:200] in users[i]: return users[i - 1].split('\n\n[kal]')[0] if i > 0 else ''
+    return ''
+
+
+def save_note(cfg, session, user_text, note, now=None):
+    """kal_note: the user asked to keep something. Stored as the user's message + the note, searchable at once.
+    Returns (ref, stored text) — the stored text is what is really in the library (never-remember content masked)."""
+    lib = lib_name(cfg); c = store.connect(store.lib_path(cfg, lib))
+    try:
+        texts = save_source(c, cfg, lib, session, user_text, [note], now=now, kind='note'); c.commit()
+    finally: c.close()
+    refs = [r for r in texts if '#t' in r]
+    return (refs[0] if refs else ''), '\n'.join(texts[r] for r in refs)
 
 
 def _redact(text, deny):
@@ -74,12 +105,12 @@ def deny_list(cfg):
     return list(DENY) + [(p, 'configured never-remember content') for p in cfg.get('memory_deny') or []]
 
 
-def save_source(c, cfg, lib, session, task, tool_texts, now=None):
+def save_source(c, cfg, lib, session, task, tool_texts, now=None, kind='chat'):
     """Store what the user said and what tools returned as a library source (searchable at once) + a markdown file.
     Never-remember content is masked before it is stored. Returns {ref: text}."""
     now = int(now or time.time()); deny = deny_list(cfg)
     stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(now))
-    rel = f"chat/{stamp}-{hashlib.sha1((session + task + str(time.time_ns())).encode()).hexdigest()[:6]}"
+    rel = f"chat/{kind + '-' if kind != 'chat' else ''}{stamp}-{hashlib.sha1((session + task + str(time.time_ns())).encode()).hexdigest()[:6]}"
     texts = {}
     for j, part in enumerate(store.split(_redact(task, deny)) or [], 1): texts[f'{rel}#u{j}'] = part
     used = 0
@@ -110,10 +141,15 @@ def _write(path, text):
     os.replace(tmp, path)
 
 
-def learn_exchange(cfg, task, messages, tools_used=0, session='', now=None):
+def learn_exchange(cfg, task, messages, tools_used=0, session='', now=None, noted=False):
     """The whole after-delivery step. Returns a summary dict (never raises into the caller's job; the hook wraps it)."""
     tool_texts = this_turn(task, messages)
+    if noted and not any(t.strip() for t in tool_texts): return {'skipped': 'already saved by kal_note'}
     if not should_write(task, tools_used, tool_texts): return {'skipped': 'nothing factual (pure chat)'}
+    if wants_note(task) and not noted:          # "記底" but the model did not call kal_note: keep it anyway
+        bare = NOTE_CUE.sub('', task).strip(' \t\n,，。.!！:：~')
+        prev = previous_user(task, messages) if len(bare) < 8 else ''
+        if prev: tool_texts = [f'(the message the user asked to keep)\n{prev}'] + tool_texts
     lib = lib_name(cfg); c = store.connect(store.lib_path(cfg, lib))
     try:
         texts = save_source(c, cfg, lib, session, task, tool_texts, now=now); c.commit()
