@@ -3,10 +3,11 @@ Standard library only. Nothing is ever deleted: changed files mark old passages 
 (Digest notes were removed 11-17: in KL4 and KL9 they added nothing over searching the original text.)"""
 import hashlib, math, os, re, sqlite3, time, zipfile
 from xml.etree import ElementTree as ET
+from .words import W
 
 EXTS = ('.md', '.txt', '.docx')
 TARGET, HARD = 500, 1000          # chunk size (characters)
-STOP = set('的了是在有和與及或但而就都也很到為以被把對從向於之其此這那咩係嘅喺同唔咗啲點乜邊個嗎呢吧啊呀嘛甚麼什麼哪嗰佢哋嘢冇噉咁啦喎囉嚟')
+STOP = set(W['stop_chars'])
 SHORT_W = 0.6                     # weight of a 2-character Chinese n-gram relative to longer terms
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source (id INTEGER PRIMARY KEY, root TEXT, path TEXT, rel TEXT, sha TEXT, active INTEGER DEFAULT 1, added INTEGER);
@@ -50,7 +51,7 @@ def read_text(path):
 
 def _split_long(line):
     parts, cur = [], ''
-    for piece in re.split(r'(?<=[。！？；.!?;])', line):
+    for piece in re.split(r'(?<=[\u3002\uff01\uff1f\uff1b.!?;])', line):
         if len(cur) + len(piece) > HARD and cur: parts.append(cur); cur = ''
         while len(piece) > HARD: parts.append(piece[:HARD]); piece = piece[HARD:]
         cur += piece
@@ -115,7 +116,7 @@ def add_folder(c, folder):
 # ---------- search ----------
 def query_terms(q, max_terms=40):
     """Sentence -> terms: raw words (split on punctuation/space) + Chinese 3-/2-grams (stop characters removed) + latin words."""
-    raw = [t for t in re.split(r'[\s,，、。？！：；「」『』（）()《》〈〉\[\]"?!.;:]+', q or '') if t]
+    raw = [t for t in re.split(r'[\s,\uff0c\u3001\u3002\uff1f\uff01\uff1a\uff1b\u300c\u300d\u300e\u300f\uff08\uff09()\u300a\u300b\u3008\u3009\[\]"?!.;:]+', q or '') if t]
     out, seen = [], set()
     def add(t):
         t = t.lower()
@@ -123,10 +124,10 @@ def query_terms(q, max_terms=40):
         if re.fullmatch(r'[a-z][a-z\-]*', t) and (len(t) < 3 or t in EN_STOP): return     # short / function English words
         seen.add(t); out.append(t)
     for t in raw:
-        if re.search(r'[一-鿿]', t) and len(t) <= 6 and not any(ch in STOP for ch in t): add(t)
+        if re.search(r'[\u4e00-\u9fff]', t) and len(t) <= 6 and not any(ch in STOP for ch in t): add(t)
         # n-grams inside each run of Chinese characters between stop characters (joining across a removed
-        # stop character made fake grams such as 羅寫羅 out of 保羅寫羅馬書)
-        for han in re.findall(r'[一-鿿]+', t):
+        # stop character made fake grams that are not in the text)
+        for han in re.findall(r'[\u4e00-\u9fff]+', t):
             for run in re.split('[' + ''.join(STOP) + ']+', han):
                 for n in (3, 2):
                     for i in range(len(run) - n + 1): add(run[i:i + n])
@@ -138,7 +139,7 @@ EN_STOP = set('the and for are was were with that this from what which who how w
               'can will would should could into about than then them they their there here its our out all any per via'.split())
 
 
-def _weight(t): return SHORT_W if len(t) == 2 and re.fullmatch(r'[一-鿿]{2}', t) else 1.0
+def _weight(t): return SHORT_W if len(t) == 2 and re.fullmatch(r'[\u4e00-\u9fff]{2}', t) else 1.0
 
 
 def _match_ids(c, term):

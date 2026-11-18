@@ -9,15 +9,24 @@ Config (worker.json):
   each candidate is scored by the model (rerank_model, else the main model) and kept at >= chat_rerank_keep (0 of 10 in KL9).
   chat_write is on by default (since 0.4.0). In a group chat it keeps what everyone in the group said; set it to false there
   if the group has not agreed.
-  kal_note: when the user says "記底" / "note this", the model saves the user's words with kal_note. If it does not, the
-  after-delivery step saves the message anyway (a bare "記底" also keeps the message before it). An answer that says
+  kal_note: when the user says "note this" / "note this", the model saves the user's words with kal_note. If it does not, the
+  after-delivery step saves the message anyway (a bare "note this" also keeps the message before it). An answer that says
   "saved" when nothing was saved is sent back to the model (before_delivery). kal_note works even with chat_write off.
+  Own choice (0.5.0): with chat_write on, the model may also call kal_note by itself for what it judges worth keeping
+  (preferences, decisions, facts about the user or their work). Such a note must be the user's own words: at least
+  NOTE_GROUND of its 3-grams must appear in what the user said this session, else it is refused (KL9: a writer model
+  invents details). It is stored as chat/auto-*, and the model is told to say in one line what it kept.
+  Never while fixing a wrong source claim (a source fix must not turn into a save).
+  Source check (0.4.1): an answer that says the library has something must match what the library returned this turn
+  (kal_search / kal_read / kal_note / injected material); quoted or bold names are checked one by one. If it came from
+  earlier in the conversation, the answer is sent back to say so.
 Notes digested by a model were removed 11-17: they added nothing over the original passages (KL4) and invented details (KL9).
 """
 import os, re, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path: sys.path.insert(0, HERE)
 from kalcore import store, chat as kchat
+from kalcore.words import alt
 
 DEFAULTS = {'libs': ['default'], 'max_chars': 3000, 'min_rel': 0.05, 'rel_top': 0.5, 'k': 5, 'inject': True,
             'rerank_model': '', 'rerank_keep': 5, 'timeout_s': 30, 'chat_write': True, 'chat_rerank': True, 'chat_rerank_keep': 3}
@@ -74,34 +83,117 @@ def context(cfg, task):
         s = f"\n[{x['ref']}]\n{x['text']}"
         if used + len(s) > o['max_chars']:
             room = o['max_chars'] - used - len(x['ref']) - 30
-            if room > 200: parts.append(f"\n[{x['ref']}]\n{x['text'][:room]}…")
+            if room > 200: parts.append(f"\n[{x['ref']}]\n{x['text'][:room]}\u2026")
             break
         parts.append(s); used += len(s)
     return ''.join(parts) if len(parts) > 1 else ''
 
 
 NOTE_HINT = ('[kal] The user asked you to keep something. Call kal_note with the user\'s own words (what they asked to keep; '
-             'if they only said "記底", the message before it). Do not add, guess or summarise. Tell the user it is saved only if '
+             'if they only said "note this", the message before it). Do not add, guess or summarise. Tell the user it is saved only if '
              'kal_note answered "kal_note saved", and show what was saved; if it failed, say it was not saved and why.')
-SAVED_CLAIM = re.compile(r'記低咗|記住咗|記咗|記下了|記住了|记住了|记下了|已記|已经记|已經記|已儲存|已存|存咗|已保存|已加入|'
+OWN_HINT = ('[kal] If the user just told you something that will matter in later conversations (their preferences, '
+            'decisions, plans, people, facts about them or their work), save it with kal_note in their own words, then '
+            'answer, and add one line saying what you kept. If it is small talk or only a question, do not save.')
+SAVED_CLAIM = re.compile(alt('saved_claim') + '|'
                          r'\b(saved|noted|stored|i will remember|i\'ll remember|got it down)\b', re.I)
 
 
 def before_task(task, ctx):
     o = opts(ctx['cfg']); ctx['kal_task'] = task; out = []
+    ctx['kal_searched'] = False; ctx['kal_hits'] = 0; ctx['kal_injected'] = 0; ctx['kal_seen'] = []
     if kchat.wants_note(task): out.append(NOTE_HINT)
+    elif o['chat_write'] and kchat.tells(task): out.append(OWN_HINT)
     if o['inject']:
         t0 = time.time(); s = context(ctx['cfg'], task)
         ctx['kal_injected'] = len(s); ctx['kal_secs'] = round(time.time() - t0, 2)
-        if s: out.append(s)
+        if s: out.append(s); ctx['kal_seen'].append(s)
     return '\n\n'.join(out) or None
 
 
+LIB_CLAIM = re.compile(r'(kal|' + alt('lib_word') + r'|library|notes?\b)[^\u3002\uff01\uff1f\n.!?]{0,16}?'
+                       r'(' + alt('lib_verb') + r'|remembers?|apart from|except|says?|shows?|has|have|contains?|found|saved|recorded|records?)', re.I)
+LIB_SRC = re.compile(r'(' + alt('lib_from') + r'|from|according to)[^\uff0c,\u3002\n]{0,8}?(kal|' + alt('lib_short') + r'|library|notes?\b)', re.I)   # "according to your kal library"
+LIB_PUT = re.compile(r'(' + alt('lib_put') + r'|saved (?:it )?(?:to|in)|stored (?:it )?in|added (?:it )?to)'
+                     r'[^\uff0c,\u3002\n]{0,8}?(kal|' + alt('lib_short') + r'|library|notes?\b)', re.I)    # "I have saved it to kal"
+LIB_NEG = re.compile(alt('negation') + r'|\b(nothing|no|not|none|empty)\b|n\'t', re.I)
+
+
+QUOTED = re.compile(r'\u300c([^\u300d]{2,60})\u300d|\u201c([^\u201d]{2,60})\u201d|"([^"\n]{2,60})"|\*\*([^*\n]{2,60})\*\*')
+
+
+def _sentences(answer):
+    """Sentences; a line ending in a colon runs on into what follows ("kal has one:\n- **Chan Bakery**")."""
+    a = re.sub(r'[\uff1a:][ \t]*\n+', '\uff1a ', answer or '')
+    a = re.sub(r'(\uff1a [^\n]*)\n(?=[ \t]*(?:[-*\u2022]|\d+[.)\u3001]) )', r'\1 ', a)   # keep the list under the colon together
+    while True:
+        b = re.sub(r'(\uff1a [^\n]*)\n(?=[ \t]*(?:[-*\u2022]|\d+[.)\u3001]) )', r'\1 ', a)
+        if b == a: break
+        a = b
+    return re.split(r'[\u3002\uff01\uff1f!?]|\n', a)
+
+
+def _claim_in(sentence):
+    """A sentence says the library holds something. Quoted words are not the answer's own claim ("I said 'kal has it'")."""
+    bare = QUOTED.sub('\u300c\u300d', sentence)
+    for m in list(LIB_CLAIM.finditer(bare)) + list(LIB_SRC.finditer(bare)):
+        tail = re.split(r'[\uff0c,;\uff1b]', bare[m.end():m.end() + 10])[0]   # "has nothing", "not recorded"
+        if not LIB_NEG.search(m.group(0) + tail): return True
+    for m in LIB_PUT.finditer(bare):
+        if re.search(r'(' + alt('offer') + r'|will|can|could|want)', bare[max(0, m.start() - 8):m.start()]): continue   # an offer, not a claim
+        if not LIB_NEG.search(bare[max(0, m.start() - 4):m.end()]): return True
+    return False
+
+
+def claims_library(answer):
+    """The answer says the user's library holds something (not 'the library has nothing')."""
+    return any(_claim_in(x) for x in _sentences(answer))
+
+
+def _grams(t):
+    t = re.sub(r'\s+', '', t.lower()); return {t[i:i + 3] for i in range(len(t) - 2)} or ({t} if t else set())
+
+
+def unsupported(answer, seen):
+    """What the answer credits to the library but the library did not return this turn. None = supported.
+    Per sentence that claims the library has something: each quote in it (unless the quote is negated: "no 'X'")
+    must be in what the library returned; a claim without quotes needs at least some library material."""
+    ev = re.sub(r'\s+', '', '\n'.join(seen).lower())
+    for sent in _sentences(answer):
+        if not _claim_in(sent): continue
+        quotes = [(m.start(), next(g for g in m.groups() if g)) for m in QUOTED.finditer(sent)]
+        quotes = [q for i, q in quotes if not LIB_NEG.search(sent[max(0, i - 4):i])]
+        if not quotes and not ev: return '(anything)'
+        for q in quotes:
+            g = _grams(q)
+            if sum(x in ev for x in g) / len(g) < 0.5: return q
+    return None
+
+
+REWRITE = (' Do not call kal_note now.'
+           ' Write the whole answer again for the user, as if for the first time: do not mention this check, a correction or an earlier version.')
+
+
 def before_delivery(answer, ctx):
-    """The user asked to keep something and the answer says it is saved: it must really be saved."""
+    """Two checks: (1) the user asked to keep something and the answer says it is saved: it must really be saved.
+    (2) the answer says the library holds something: what it quotes must be in what the library returned this turn
+    (kal_search / kal_read / kal_note / injected [kal] material). Otherwise it came from the conversation, not the library."""
     if kchat.wants_note(ctx.get('kal_task')) and not ctx.get('kal_noted') and SAVED_CLAIM.search(answer or ''):
         return ('kal: your answer says it was saved, but kal_note was not called or did not succeed, so nothing is saved yet. '
                 'Call kal_note with the user\'s own words now; or tell the user plainly that it was not saved.')
+    if claims_library(answer):
+        miss = unsupported(answer, ctx.get('kal_seen') or [])
+        if miss is None: return None
+        what = '' if miss == '(anything)' else f' ("{miss}")'
+        if not kchat.wants_note(ctx.get('kal_task')): ctx['kal_no_note'] = True   # a source fix must not turn into a save
+        if not ctx.get('kal_searched'):
+            return (f'kal: your answer says the library has this{what}, but you did not look in the library this turn. '
+                    'Call kal_search to check. If it is not there and you know it from earlier in this conversation, say it '
+                    'comes from this conversation, not from kal.' + REWRITE)
+        return (f'kal: your answer says the library has this{what}, but kal_search did not return it this turn, so the library '
+                'does not have it. If you know it from earlier in this conversation, say it comes from this conversation, not '
+                'from kal (it is not in the library, so it will be gone after this session; the user can say "note this" to keep it). '
+                'If you do not know it, say so.' + REWRITE)
     return None
 
 
@@ -110,8 +202,12 @@ SEARCH = {'type': 'function', 'function': {'name': 'kal_search',
           'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}, 'k': {'type': 'integer', 'description': 'max results (default 5)'}},
                          'required': ['query']}}}
 NOTE = {'type': 'function', 'function': {'name': 'kal_note',
-        'description': "Save what the user asked you to keep (\"記底\", \"note this\") to the user's own library, word for word. "
-                       "Use the user's words; never add or guess details. Returns what was really saved.",
+        'description': "Save something to the user's own library so later conversations can find it: (1) what the user asked "
+                       "you to keep (\"note this\"); (2) on your own judgement, what the user told you that will matter "
+                       "again: their preferences, decisions, plans, facts about them, their people or their work, names and "
+                       "numbers they will need. Not small talk, not your own answers or guesses, not what the library already has. "
+                       "Use the user's own words; never add or guess details. If you save on your own, tell the user in one line "
+                       "what you kept. Returns what was really saved.",
         'parameters': {'type': 'object', 'properties': {'text': {'type': 'string', 'description': "the user's own words to keep"}},
                        'required': ['text']}}}
 READ = {'type': 'function', 'function': {'name': 'kal_read',
@@ -122,29 +218,55 @@ READ = {'type': 'function', 'function': {'name': 'kal_read',
 def kal_search(ctx, query, k=5):
     lines = []
     for lib, c in _libs(ctx['cfg']):
-        lines += [f"[{x['ref']}] (rel {x['rel']}): {x['text'][:200].replace(chr(10), ' ')}" for x in store.search(c, query, k=int(k or 5), min_rel=0.05)]
+        hits = store.search(c, query, k=int(k or 5), min_rel=0.05)
+        ctx.setdefault('kal_seen', []).extend(x['text'] for x in hits)
+        lines += [f"[{x['ref']}] (rel {x['rel']}): {x['text'][:200].replace(chr(10), ' ')}" for x in hits]
         c.close()
+    ctx['kal_searched'] = True; ctx['kal_hits'] = ctx.get('kal_hits', 0) + len(lines)
     return True, '\n'.join(lines) or 'nothing in the library matches; try other words.'
 
 
 def kal_read(ctx, ref):
     for lib, c in _libs(ctx['cfg']):
         r = store.read_ref(c, ref.strip().strip('[]')); c.close()
-        if r: return True, f"[{r['ref']}]\n{r['text']}" + (f"\n(neighbours: {', '.join(r['neighbours'])})" if r['neighbours'] else '')
+        if r:
+            ctx['kal_hits'] = ctx.get('kal_hits', 0) + 1; ctx.setdefault('kal_seen', []).append(r['text'])
+            return True, f"[{r['ref']}]\n{r['text']}" + (f"\n(neighbours: {', '.join(r['neighbours'])})" if r['neighbours'] else '')
     return False, f'no passage with ref {ref!r}; use kal_search first.'
+
+
+NOTE_GROUND = 0.6     # own-choice notes: share of 3-grams that must come from what the user said
+
+
+def _user_said(ctx):
+    msgs = [m.get('content') for m in ctx.get('messages') or [] if m.get('role') == 'user' and isinstance(m.get('content'), str)]
+    return ''.join(x.split('\n\n[kal]')[0] for x in msgs) + (ctx.get('kal_task') or '')
 
 
 def kal_note(ctx, text):
     text = (text or '').strip()
     if not text: return False, 'kal_note: nothing to save (text is empty). Nothing was saved.'
+    asked = kchat.wants_note(ctx.get('kal_task'))
+    if ctx.get('kal_no_note') and not asked:
+        return False, ('kal_note: not saved. You are fixing where a fact came from; saving it now would make the claim look '
+                       'true. Answer the question and say where your facts came from.')
+    if not asked:
+        if not opts(ctx['cfg'])['chat_write']:
+            return False, 'kal_note: not saved. The conversation library is off; only what the user asks to keep ("note this") is saved.'
+        g = _grams(text); said = re.sub(r'\s+', '', _user_said(ctx).lower())
+        if sum(x in said for x in g) / len(g) < NOTE_GROUND:
+            return False, ('kal_note: not saved. On your own you may only keep what the user said, in their words; this text '
+                           'is not in what the user said. Use the user\'s own words, or do not save.')
     try:
-        ref, stored = kchat.save_note(ctx['cfg'], ctx.get('session') or '', ctx.get('kal_task') or text, text)
+        ref, stored = kchat.save_note(ctx['cfg'], ctx.get('session') or '', ctx.get('kal_task') or text, text,
+                                      kind='note' if asked else 'auto')
     except Exception as e:
         return False, f'kal_note failed: {type(e).__name__}: {e}. Nothing was saved; tell the user.'
     if not ref: return False, 'kal_note: nothing was saved (empty after masking). Tell the user.'
-    ctx['kal_noted'] = True
+    ctx['kal_noted'] = True; ctx.setdefault('kal_seen', []).append(stored)
     masked = ' (some never-remember content was masked)' if stored != text else ''
-    return True, f'{kchat.NOTED} [{ref}]{masked}:\n{stored}'
+    tail = '' if asked else '\n(saved on your own choice: tell the user in one line what you kept, so they can say if they do not want it.)'
+    return True, f'{kchat.NOTED} [{ref}]{masked}:\n{stored}{tail}'
 
 
 def after_delivery(answer, ctx, checks):
@@ -167,7 +289,7 @@ def _chat_libs(cfg):
 
 
 USAGE = """usage: lamellar kal add <folder> [--lib NAME] | search "<query>" | read <ref> | status | context "<task>"
-       lamellar kal chats | rebuild --lib chat-…   (conversation libraries)
+       lamellar kal chats | rebuild --lib chat-...   (conversation libraries)
 Libraries are SQLite files in ~/.lamellar/kal/; "libs" in the kal config says which ones answer questions."""
 
 
@@ -204,7 +326,7 @@ def command(args, cfg):
             print(f"{l}: {s['files']} conversations, {s['chunks']} passages")
         return 0
     if cmd == 'rebuild':
-        if not lib.startswith('chat-'): print('rebuild is for conversation libraries (--lib chat-…); folder libraries: add the folder again'); return 1
+        if not lib.startswith('chat-'): print('rebuild is for conversation libraries (--lib chat-...); folder libraries: add the folder again'); return 1
         print(kchat.rebuild(cfg, lib)); return 0
     print(USAGE); return 0 if cmd in ('help', '-h', '--help') else 1
 

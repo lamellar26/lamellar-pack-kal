@@ -10,6 +10,7 @@ No model is called. Markdown is the source of truth: <state>/kal/<lib>/sources/*
 (Model-written notes, links and fading were removed 11-17: in the KL9 replay they invented details in 3 of 24 notes.)
 """
 import hashlib, json, os, re, time
+from .words import alt
 from . import store
 
 SRC_CAP, SRC_TOTAL = 4000, 12000
@@ -31,34 +32,42 @@ def md_dir(cfg, lib):
 
 
 # ---------- KL6: should we look at all, and what is the source ----------
-GREETING = re.compile(r'^\s*(hi|hello|hey|thanks?|thank you|ok|okay|好|好的|多謝|唔該|謝謝|你好|早晨|在嗎|喺度嗎|bye|拜拜)[\s!！.。?？~]*$', re.I)
-QUESTION_END = re.compile(r'([?？]|嗎|吗|呢|未|冇|咩|乜|邊個|點樣|點解|幾多|什麼|甚麼|怎樣|如何)\s*[?？!！。.]*\s*$')
-FACTY = re.compile(r'\d|[A-Za-z0-9_\-]+\.[A-Za-z]{2,4}\b|https?://|「.+?」|"[^"]{2,}"|[A-Z][a-z]+[A-Z]?|[A-Z]{2,}')
+GREETING = re.compile(r'^\s*(hi|hello|hey|thanks?|thank you|ok|okay|bye|' + alt('greeting') + r')[\s!\uff01.\u3002?\uff1f~]*$', re.I)
+QUESTION_END = re.compile(r'([?\uff1f]|' + alt('question_end') + r')\s*[?\uff1f!\uff01\u3002.]*\s*$')
+FACTY = re.compile(r'\d|[A-Za-z0-9_\-]+\.[A-Za-z]{2,4}\b|https?://|\u300c.+?\u300d|"[^"]{2,}"|[A-Z][a-z]+[A-Z]?|[A-Z]{2,}')
 
 
 def stated_facts(text):
     """Sentences in the user's message that state something (not only ask), and carry something concrete."""
     out = []
-    for s in re.split(r'(?<=[。！!；;\n])|(?<=[?？])', text or ''):
+    for s in re.split(r'(?<=[\u3002\uff01!\uff1b;\n])|(?<=[?\uff1f])', text or ''):
         s = s.strip()
         if len(s) < 8 or GREETING.match(s) or QUESTION_END.search(s): continue
         if FACTY.search(s) or len(s) >= 25: out.append(s)
     return out
 
 
-NOTE_CUE = re.compile(r'記底|記低|記住|記下|记住|记下|记底|幫我記|帮我记|備忘|备忘|'
+def tells(text):
+    """The user's message tells something (a statement of 8+ characters), not only asks or greets: a note may be worth it."""
+    for s in re.split(r'(?<=[\u3002\uff01!\uff1b;\uff0c,\n])|(?<=[?\uff1f])', text or ''):
+        s = s.strip()
+        if len(s) >= 8 and not GREETING.match(s) and not QUESTION_END.search(s): return True
+    return False
+
+
+NOTE_CUE = re.compile(alt('note_cue') + '|'
                       r'\b(note|jot) (this|that|it|down)\b|\b(take|make) a note\b|\bremember (this|that)\b', re.I)
 NOTED = 'kal_note saved'      # prefix of a successful kal_note result (so the after-delivery step does not save it twice)
 
 
 def wants_note(text):
-    """The user explicitly asked to keep something ("記底", "note this"): saved whatever the length filter says."""
+    """The user explicitly asked to keep something ("note this", or the same in Chinese): saved whatever the length filter says."""
     t = (text or '').strip()
     return bool(NOTE_CUE.search(t)) and not QUESTION_END.search(t)
 
 
 def should_write(task, tools_used, tool_texts):
-    """KL6 gate: pure chat never calls the model. An explicit "記底" is always saved."""
+    """KL6 gate: pure chat never calls the model. An explicit "note this" is always saved."""
     if wants_note(task): return True
     if GREETING.match(task or ''): return False
     if tools_used and any(t.strip() for t in tool_texts): return True
@@ -74,19 +83,19 @@ def this_turn(task, messages):
 
 
 def previous_user(task, messages):
-    """The user's message before this one (for a bare "記底" that points at what was just said)."""
+    """The user's message before this one (for a bare "note this" that points at what was just said)."""
     users = [m['content'] for m in messages if m.get('role') == 'user' and isinstance(m.get('content'), str)]
     for i in range(len(users) - 1, -1, -1):
         if task and task[:200] in users[i]: return users[i - 1].split('\n\n[kal]')[0] if i > 0 else ''
     return ''
 
 
-def save_note(cfg, session, user_text, note, now=None):
+def save_note(cfg, session, user_text, note, now=None, kind='note'):
     """kal_note: the user asked to keep something. Stored as the user's message + the note, searchable at once.
-    Returns (ref, stored text) — the stored text is what is really in the library (never-remember content masked)."""
+    Returns (ref, stored text): the stored text is what is really in the library (never-remember content masked)."""
     lib = lib_name(cfg); c = store.connect(store.lib_path(cfg, lib))
     try:
-        texts = save_source(c, cfg, lib, session, user_text, [note], now=now, kind='note'); c.commit()
+        texts = save_source(c, cfg, lib, session, user_text, [note], now=now, kind=kind); c.commit()
     finally: c.close()
     refs = [r for r in texts if '#t' in r]
     return (refs[0] if refs else ''), '\n'.join(texts[r] for r in refs)
@@ -146,8 +155,8 @@ def learn_exchange(cfg, task, messages, tools_used=0, session='', now=None, note
     tool_texts = this_turn(task, messages)
     if noted and not any(t.strip() for t in tool_texts): return {'skipped': 'already saved by kal_note'}
     if not should_write(task, tools_used, tool_texts): return {'skipped': 'nothing factual (pure chat)'}
-    if wants_note(task) and not noted:          # "記底" but the model did not call kal_note: keep it anyway
-        bare = NOTE_CUE.sub('', task).strip(' \t\n,，。.!！:：~')
+    if wants_note(task) and not noted:          # "note this" but the model did not call kal_note: keep it anyway
+        bare = NOTE_CUE.sub('', task).strip(' \t\n,\uff0c\u3002.!\uff01:\uff1a~')
         prev = previous_user(task, messages) if len(bare) < 8 else ''
         if prev: tool_texts = [f'(the message the user asked to keep)\n{prev}'] + tool_texts
     lib = lib_name(cfg); c = store.connect(store.lib_path(cfg, lib))

@@ -3,14 +3,16 @@ import os, shutil, sys, tempfile, unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, HERE)
 for p in (os.environ.get('LAMELLAR_CORE', ''), os.path.join(os.path.dirname(HERE), 'lamellar')):
     if p and os.path.isdir(p): sys.path.insert(0, p)
+import json
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures.json'), encoding='utf-8') as f: T = json.load(f)   # Chinese test text
 import pack
 from kalcore import store, chat as kc
 
-TOOL_OUT = ("報價單 Q-2031：客戶 Bright Harbour 訂 40 部 LeArm 機械臂，交貨期 2026-12-05。\n"
-            "倉存表顯示 LeArm 現貨 25 部，另外 15 部要向深圳廠補貨。")
-TASK = '幫我睇吓 quotes/Q-2031.txt 份報價單，交唔交得切貨？'
-ANSWER = '份報價單要 40 部，現貨得 25 部，所以要補 15 部。我建議即日落單補貨，應該趕得切 12 月 5 號。'
-Q = 'Bright Harbour 訂咗幾多部 LeArm？'
+TOOL_OUT = (T['chat_module_1'] +
+            T['chat_module_2'])
+TASK = T['chat_module_3']
+ANSWER = T['chat_module_4']
+Q = T['chat_module_5']
 
 
 def msgs_for(task, tool_out):
@@ -35,8 +37,8 @@ class Base(unittest.TestCase):
 
 
 class KL6Trigger(Base):
-    PURE = ['你是誰？', 'hi', '你有記憶嗎？', 'The North Face的產品耐用嗎？', '多謝', '你能寫程式嗎？', '在嗎？', '你是什麼model?', 'tnf t shirt耐用嗎？', 'OK']
-    FACTS = ['我哋公司用 Xero 做帳，月結喺每月 5 號。', 'Bright Harbour 嘅聯絡人叫 Kelvin，佢負責採購。',
+    PURE = [T['chat_module_6'], 'hi', T['chat_module_7'], T['chat_module_8'], T['chat_module_9'], T['chat_module_10'], T['chat_module_11'], T['chat_module_12'], T['chat_module_13'], 'OK']
+    FACTS = [T['chat_module_14'], T['chat_module_15'],
              'The new warehouse is in Kwai Chung, unit 7B, and opens on Monday.']
 
     def test_pure_chat_not_saved(self):
@@ -45,12 +47,12 @@ class KL6Trigger(Base):
 
     def test_facts_or_tools_trigger(self):
         for t in self.FACTS: self.assertTrue(kc.should_write(t, 0, []), t)
-        self.assertTrue(kc.should_write('讀吓呢份檔', 1, ['file content']))
-        self.assertFalse(kc.should_write('讀吓呢份檔', 1, ['   ']))
+        self.assertTrue(kc.should_write(T['chat_facts_or_tools_trigger_1'], 1, ['file content']))
+        self.assertFalse(kc.should_write(T['chat_facts_or_tools_trigger_2'], 1, ['   ']))
 
     def test_stated_fact_without_tools_is_searchable(self):
-        self.learn(task='打印機 IP 係 10.20.0.45，喺三樓。', tool=None)
-        self.assertIn('10.20.0.45', pack.context(self.cfg, '打印機 IP 係幾多？'))
+        self.learn(task=T['chat_stated_fact_without_tools_is_searchable_1'], tool=None)
+        self.assertIn('10.20.0.45', pack.context(self.cfg, T['chat_stated_fact_without_tools_is_searchable_2']))
 
     def test_background_error_does_not_break_delivery(self):
         from lamellar.core import packs
@@ -64,12 +66,12 @@ class KL6Source(Base):
     def test_saved_text_is_user_and_tools_never_the_answer(self):
         out = self.learn(); self.assertGreater(out['source_refs'], 0)
         s = pack.context(self.cfg, Q)
-        self.assertIn('40 部', s); self.assertNotIn('我建議', s)
+        self.assertIn(T['chat_saved_text_is_user_and_tools_never_the_answer_1'], s); self.assertNotIn(T['chat_saved_text_is_user_and_tools_never_the_answer_2'], s)
         c = self.db(); txt = ' '.join(r[0] for r in c.execute('SELECT text FROM chunk')); c.close()
-        self.assertNotIn('我建議', txt)
+        self.assertNotIn(T['chat_saved_text_is_user_and_tools_never_the_answer_3'], txt)
 
     def test_privacy_masked_before_store(self):
-        tool = TOOL_OUT + '\nKelvin 電話 9123 4567，聯絡 kelvin@brightharbour.com。訂金 HK$ 48,000。系統 password: hunter22'
+        tool = TOOL_OUT + T['chat_privacy_masked_before_store_1']
         self.learn(tool=tool)
         c = self.db(); txt = ' '.join(r[0] for r in c.execute('SELECT text FROM chunk')); c.close()
         for s in ('9123 4567', 'kelvin@brightharbour.com', '48,000', 'hunter22'): self.assertNotIn(s, txt)
@@ -86,7 +88,7 @@ class KL6Source(Base):
         self.assertNotEqual(kc.lib_name(self.cfg), kc.lib_name(bob))
 
     def test_rebuild_matches_md(self):
-        self.learn(); self.learn(task='Q-2031 有更新', tool='報價單 Q-2031 已改：客戶 Bright Harbour 改為訂 60 部 LeArm 機械臂。')
+        self.learn(); self.learn(task=T['chat_rebuild_matches_md_1'], tool=T['chat_rebuild_matches_md_2'])
         dump = lambda: sorted(self.db().execute('SELECT ref, text FROM chunk').fetchall())
         before = dump()
         self.assertEqual(kc.rebuild(self.cfg, kc.lib_name(self.cfg)), {'sources': 2})
@@ -99,8 +101,8 @@ class KL6Hook(Base):
     def test_hook_saves_and_skips(self):
         ctx = {'cfg': self.cfg, 'task': TASK, 'messages': msgs_for(TASK, TOOL_OUT), 'tools_used': 1, 'session': 's'}
         pack.after_delivery(ANSWER, ctx, None); self.assertGreater(ctx['kal_chat']['source_refs'], 0)
-        ctx2 = {'cfg': self.cfg, 'task': '你是誰？', 'messages': [{'role': 'user', 'content': '你是誰？'}], 'tools_used': 0}
-        pack.after_delivery('我係 lamellar', ctx2, None); self.assertIn('skipped', ctx2['kal_chat'])
+        ctx2 = {'cfg': self.cfg, 'task': T['chat_hook_saves_and_skips_1'], 'messages': [{'role': 'user', 'content': T['chat_hook_saves_and_skips_2']}], 'tools_used': 0}
+        pack.after_delivery(T['chat_hook_saves_and_skips_3'], ctx2, None); self.assertIn('skipped', ctx2['kal_chat'])
 
     def test_off_when_disabled(self):
         cfg = {**self.cfg, 'kal': {'chat_write': False}}; ctx = {'cfg': cfg, 'task': TASK, 'messages': msgs_for(TASK, TOOL_OUT), 'tools_used': 1}
@@ -123,53 +125,116 @@ if __name__ == '__main__': unittest.main()
 
 
 class Note(Base):
-    """0.4.0: "記底" is an explicit instruction; a claim of "saved" must be true."""
+    T['chat_module_16']
     def test_cue(self):
-        for t in ['記底：觀塘有間陳大餅店', '記底', '幫我記住 Kelvin 鍾意飲奶茶', 'note this: gate code is in the drawer']:
+        for t in [T['chat_cue_1'], T['chat_cue_2'], T['chat_cue_3'], 'note this: gate code is in the drawer']:
             self.assertTrue(kc.wants_note(t), t)
-        for t in ['為什麼無加入筆記指令？', '你記住咗未？', '今日好熱']:
+        for t in [T['chat_cue_4'], T['chat_cue_5'], T['chat_cue_6']]:
             self.assertFalse(kc.wants_note(t), t)
 
-    def test_short_fact_with_cue_is_saved(self):            # the 陳大餅店 case: 8 chars, no digits, used to be skipped
-        out = self.learn(task='記底，觀塘有間陳大餅店', tool=None)
+    def test_short_fact_with_cue_is_saved(self):            # the bakery case (11-18): 8 chars, no digits, used to be skipped
+        out = self.learn(task=T['chat_short_fact_with_cue_is_saved_1'], tool=None)
         self.assertNotIn('skipped', out)
-        self.assertIn('陳大餅店', pack.kal_search({'cfg': self.cfg}, '陳大餅店')[1])
+        self.assertIn(T['chat_short_fact_with_cue_is_saved_2'], pack.kal_search({'cfg': self.cfg}, T['chat_short_fact_with_cue_is_saved_3'])[1])
 
     def test_bare_cue_keeps_previous_message(self):
-        msgs = [{'role': 'user', 'content': '觀塘有間陳大餅店'}, {'role': 'assistant', 'content': '好'},
-                {'role': 'user', 'content': '記底'}]
-        kc.learn_exchange(self.cfg, '記底', msgs, 0, 's')
-        self.assertIn('陳大餅店', pack.kal_search({'cfg': self.cfg}, '陳大餅店')[1])
+        msgs = [{'role': 'user', 'content': T['chat_bare_cue_keeps_previous_message_1']}, {'role': 'assistant', 'content': T['chat_bare_cue_keeps_previous_message_2']},
+                {'role': 'user', 'content': T['chat_bare_cue_keeps_previous_message_3']}]
+        kc.learn_exchange(self.cfg, T['chat_bare_cue_keeps_previous_message_4'], msgs, 0, 's')
+        self.assertIn(T['chat_bare_cue_keeps_previous_message_5'], pack.kal_search({'cfg': self.cfg}, T['chat_bare_cue_keeps_previous_message_6'])[1])
 
     def test_kal_note_tool(self):
-        ctx = {'cfg': self.cfg, 'kal_task': '記底：觀塘有間陳大餅店', 'session': 's'}
-        ok, out = pack.kal_note(ctx, '觀塘有間陳大餅店')
+        ctx = {'cfg': self.cfg, 'kal_task': T['chat_kal_note_tool_1'], 'session': 's'}
+        ok, out = pack.kal_note(ctx, T['chat_kal_note_tool_2'])
         self.assertTrue(ok); self.assertTrue(out.startswith(kc.NOTED)); self.assertTrue(ctx['kal_noted'])
-        self.assertIn('陳大餅店', pack.context({**self.cfg, 'kal': {'chat_write': True, 'chat_rerank': False}}, '觀塘陳大餅店喺邊？'))
+        self.assertIn(T['chat_kal_note_tool_3'], pack.context({**self.cfg, 'kal': {'chat_write': True, 'chat_rerank': False}}, T['chat_kal_note_tool_4']))
         self.assertFalse(pack.kal_note(ctx, '  ')[0])
+
+    def test_kal_note_own_choice(self):
+        """0.5.0: the model may keep what the user said on its own judgement, but only the user's words."""
+        cfg = {**self.cfg, 'kal': {'chat_write': True, 'chat_rerank': False}}
+        msgs = [{'role': 'user', 'content': T['chat_kal_note_own_choice_1']}]
+        ok, out = pack.kal_note({'cfg': cfg, 'kal_task': T['chat_kal_note_own_choice_2'], 'messages': msgs, 'session': 's'}, T['chat_kal_note_own_choice_3'])
+        self.assertTrue(ok, out); self.assertIn('own choice', out); self.assertIn('chat/auto-', out)
+        self.assertIn(T['chat_kal_note_own_choice_4'], pack.kal_search({'cfg': cfg}, T['chat_kal_note_own_choice_5'])[1])
+        ok, out = pack.kal_note({'cfg': cfg, 'kal_task': T['chat_kal_note_own_choice_6'], 'messages': msgs}, T['chat_kal_note_own_choice_7'])
+        self.assertFalse(ok); self.assertIn("user's own words", out)                 # invented: refused
+        off = {**self.cfg, 'kal': {'chat_write': False}}
+        self.assertFalse(pack.kal_note({'cfg': off, 'kal_task': T['chat_kal_note_own_choice_8'], 'messages': msgs}, T['chat_kal_note_own_choice_9'])[0])
+
+    def test_kal_note_not_from_answer(self):
+        T['chat_kal_note_not_from_answer_1']
+        ok, out = pack.kal_note({'cfg': self.cfg, 'kal_task': T['chat_kal_note_not_from_answer_2']}, T['chat_kal_note_not_from_answer_3'])
+        self.assertFalse(ok)
+        self.assertNotIn(T['chat_kal_note_not_from_answer_4'], pack.kal_search({'cfg': self.cfg}, T['chat_kal_note_not_from_answer_5'])[1])
+        self.assertTrue(pack.kal_note({'cfg': self.cfg, 'kal_task': T['chat_kal_note_not_from_answer_6']}, T['chat_kal_note_not_from_answer_7'])[0])
+        self.assertTrue(pack.claims_library(T['chat_kal_note_not_from_answer_8']))          # run 11 after kal_note was refused
+        self.assertFalse(pack.claims_library(T['chat_kal_note_not_from_answer_9']))
+        self.assertTrue(pack.claims_library(T['chat_kal_note_not_from_answer_10']))   # run 22
+        self.assertFalse(pack.claims_library(T['chat_kal_note_not_from_answer_11']))
+        self.assertTrue(pack.claims_library(T['chat_kal_note_not_from_answer_12']))
 
     def test_kal_note_works_with_chat_write_off(self):
         cfg = {**self.cfg, 'kal': {'chat_write': False, 'chat_rerank': False}}
-        pack.kal_note({'cfg': cfg, 'kal_task': '記底 X'}, '觀塘有間陳大餅店')
-        self.assertIn('陳大餅店', pack.kal_search({'cfg': cfg}, '陳大餅店')[1])
+        pack.kal_note({'cfg': cfg, 'kal_task': T['chat_kal_note_works_with_chat_write_off_1']}, T['chat_kal_note_works_with_chat_write_off_2'])
+        self.assertIn(T['chat_kal_note_works_with_chat_write_off_3'], pack.kal_search({'cfg': cfg}, T['chat_kal_note_works_with_chat_write_off_4'])[1])
 
     def test_no_double_save_after_kal_note(self):
-        msgs = [{'role': 'user', 'content': '記底：觀塘有間陳大餅店'},
-                {'role': 'tool', 'content': kc.NOTED + ' [chat/x#t1.1]:\n觀塘有間陳大餅店'}]
-        self.assertIn('skipped', kc.learn_exchange(self.cfg, '記底：觀塘有間陳大餅店', msgs, 1, 's', noted=True))
+        msgs = [{'role': 'user', 'content': T['chat_no_double_save_after_kal_note_1']},
+                {'role': 'tool', 'content': kc.NOTED + T['chat_no_double_save_after_kal_note_2']}]
+        self.assertIn('skipped', kc.learn_exchange(self.cfg, T['chat_no_double_save_after_kal_note_3'], msgs, 1, 's', noted=True))
 
     def test_false_saved_claim_bounced(self):
-        ctx = {'cfg': self.cfg, 'kal_task': '記底：觀塘有間陳大餅店'}
-        self.assertIsNotNone(pack.before_delivery('好，記低咗！', ctx))
-        self.assertIsNone(pack.before_delivery('未存到，因為出錯。', ctx))
+        ctx = {'cfg': self.cfg, 'kal_task': T['chat_false_saved_claim_bounced_1']}
+        self.assertIsNotNone(pack.before_delivery(T['chat_false_saved_claim_bounced_2'], ctx))
+        self.assertIsNone(pack.before_delivery(T['chat_false_saved_claim_bounced_3'], ctx))
         ctx['kal_noted'] = True
-        self.assertIsNone(pack.before_delivery('好，記低咗！', ctx))
-        self.assertIsNone(pack.before_delivery('記低咗', {'cfg': self.cfg, 'kal_task': '今日好熱'}))
+        self.assertIsNone(pack.before_delivery(T['chat_false_saved_claim_bounced_4'], ctx))
+        self.assertIsNone(pack.before_delivery(T['chat_false_saved_claim_bounced_5'], {'cfg': self.cfg, 'kal_task': T['chat_false_saved_claim_bounced_6']}))
+
+    def test_library_claim_after_empty_search_bounced(self):
+        ctx = {'cfg': {**self.cfg, 'kal': {'inject': False}}}
+        pack.before_task(T['chat_library_claim_after_empty_search_bounced_1'], ctx)
+        ok, out = pack.kal_search(ctx, T['chat_library_claim_after_empty_search_bounced_2'])
+        self.assertIn('nothing in the library', out)
+        bad = T['chat_library_claim_after_empty_search_bounced_3']
+        self.assertIsNotNone(pack.before_delivery(bad, ctx))
+        self.assertIsNone(pack.before_delivery(T['chat_library_claim_after_empty_search_bounced_4'], ctx))
+        self.assertIsNone(pack.before_delivery(T['chat_library_claim_after_empty_search_bounced_5'], ctx))
+        ctx['kal_seen'] = [T['chat_library_claim_after_empty_search_bounced_6']]                       # 11-18 case: a hit, but only the user's own question
+        self.assertIn(T['chat_library_claim_after_empty_search_bounced_7'], pack.before_delivery(bad, ctx))
+        ctx['kal_seen'] = [T['chat_library_claim_after_empty_search_bounced_8']]    # the library really has it: claim allowed
+        self.assertIsNone(pack.before_delivery(bad, ctx))
+        self.assertIn('kal_search', pack.before_delivery(bad, {'cfg': self.cfg, 'kal_task': 'x'}))   # no lookup at all: go and check
+        self.assertIsNone(pack.before_delivery(T['chat_library_claim_after_empty_search_bounced_9'], {'cfg': self.cfg, 'kal_seen': ['something']}))   # no quote: any evidence will do
+        fixed = (T['chat_library_claim_after_empty_search_bounced_10'] +
+                 T['chat_library_claim_after_empty_search_bounced_11'])
+        listed = T['chat_library_claim_after_empty_search_bounced_12']   # 11-18 run 7: name on the next line, bold
+        self.assertEqual(pack.unsupported(listed, [T['chat_library_claim_after_empty_search_bounced_13']]), T['chat_library_claim_after_empty_search_bounced_14'])
+        self.assertIsNone(pack.unsupported(listed, [T['chat_library_claim_after_empty_search_bounced_15']]))
+        self.assertIsNone(pack.before_delivery(fixed,{'cfg': self.cfg, 'kal_searched': True, 'kal_seen': [T['chat_library_claim_after_empty_search_bounced_16']]}))
+
+    def test_no_note_after_source_bounce(self):
+        ctx = {'cfg': self.cfg, 'kal_task': T['chat_no_note_after_source_bounce_1'], 'kal_searched': True, 'kal_seen': []}
+        self.assertIsNotNone(pack.before_delivery(T['chat_no_note_after_source_bounce_2'], ctx))
+        ok, out = pack.kal_note(ctx, T['chat_no_note_after_source_bounce_3'])
+        self.assertFalse(ok); self.assertNotIn(T['chat_no_note_after_source_bounce_4'], pack.kal_search({'cfg': self.cfg}, T['chat_no_note_after_source_bounce_5'])[1])
+
+    def test_claims_library(self):
+        self.assertTrue(pack.claims_library('My notes show you like egg tarts.'))
+        self.assertTrue(pack.claims_library(T['chat_claims_library_1']))
+        self.assertFalse(pack.claims_library('The library has nothing on that.'))
+        self.assertFalse(pack.claims_library(T['chat_claims_library_2']))
+        self.assertTrue(pack.claims_library(T['chat_claims_library_3']))
+        self.assertEqual(pack.unsupported(T['chat_claims_library_4'], [T['chat_claims_library_5']]), T['chat_claims_library_6'])
+        self.assertFalse(pack.claims_library(T['chat_claims_library_7']))
 
     def test_hint_injected(self):
         ctx = {'cfg': {**self.cfg, 'kal': {'inject': False}}}
-        self.assertIn('kal_note', pack.before_task('記底：觀塘有間陳大餅店', ctx))
-        self.assertIsNone(pack.before_task('今日好熱', ctx))
+        self.assertIn('kal_note', pack.before_task(T['chat_hint_injected_1'], ctx))
+        self.assertIsNone(pack.before_task(T['chat_hint_injected_2'], ctx))
+        self.assertIn('own words', pack.before_task(T['chat_hint_injected_3'], ctx))
+        self.assertIsNone(pack.before_task(T['chat_hint_injected_4'], ctx))
 
     def test_default_on(self):
         self.assertTrue(pack.DEFAULTS['chat_write'])

@@ -41,11 +41,17 @@ Each user gets a private library: `chat-<bot>-<chat>.db`. One user never sees an
 - The assistant's own words are never saved as a source.
 - Content on the never-remember list (passwords, keys, ID numbers, phone numbers, emails, amounts) is masked before storing.
 
-**When the user says "note this"** ("記底", "remember this", "take a note")
+**When the user says "note this"** ("remember this", "take a note", or the same in Chinese)
 - The model saves the user's own words with the `kal_note` tool, and the reply shows what was saved.
 - If the model does not call `kal_note`, the message is saved after the answer anyway, whatever its length. A bare "note this" also keeps the message before it.
 - If the answer says "saved" but nothing was saved, the answer is sent back to the model before the user sees it.
 - `kal_note` works even with `chat_write` off: asking is consent.
+- **On its own** (with `chat_write` on): when the user tells something that will matter later (preferences, decisions, plans, people), the model may save it with `kal_note` and says in one line what it kept. Such a note must be the user's own words: if 60% of it is not in what the user said, it is refused, so the model cannot write its own guesses into the library. Stored as `chat/auto-*`.
+- Never while the model is fixing a wrong "the library has it" claim.
+
+**Where an answer says it came from**
+- If an answer says "the library has X", X must be in what the library returned this turn (search, read, note or injected material). Quoted and bold names are checked one by one.
+- If X only came from earlier in the conversation, the answer is sent back: it must say it came from the conversation, which is gone when the session ends.
 
 **How it is searched**
 - Conversation passages are mostly long tool outputs, so word overlap alone lets unrelated questions in.
